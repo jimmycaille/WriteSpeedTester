@@ -1,2 +1,2 @@
 ## README 
-todo 
+see comment beggining of write_files.c

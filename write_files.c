@@ -18,7 +18,9 @@
 *        -p    cpu/task priority   0
 *        -d    shows deleted files disabled
 *
-* Version : v0.2 - deletes generated files and subfolder
+* Version : v0.3 - possibility to run multiple times (-m)
+*                  with min/max/avg calcuation in sec/MBps
+*           v0.2 - deletes generated files and subfolder
 *           v0.1 - create subfolder for the test files
 *
 ******************************************************/
@@ -26,6 +28,8 @@
 #define _GNU_SOURCE
 #define STR_MAX_LEN 258
 #define SUB_FOLDER "TEST_FOLDER"
+#define BPS_UNIT "MBps"
+#define BPS_RATIO 1000000
 
 #include <sched.h>
 #include <sys/time.h>
@@ -37,7 +41,8 @@
 #include <stdlib.h>
 #include <dirent.h>   //opendir()
 #include <sys/stat.h> //mkdir()                  ### TODO ADAPT FOR WINDOWS ###
-#include <stdbool.h> //boolean
+#include <stdbool.h>  //boolean
+#include <float.h>    //FLT_MIN and FLT_MAX
 
 #include "write_files.h"
 
@@ -47,8 +52,6 @@ int main (int argc, char* argv[]){
   int       ret;
   cpu_set_t set;
   struct sched_param sp = {.sched_priority = 50, };
-  struct timespec    tStart, tEnd;
-  float  dif;
   char   subf[STR_MAX_LEN];
 
   //default values
@@ -133,25 +136,14 @@ int main (int argc, char* argv[]){
   ret=sched_setscheduler (0, SCHED_FIFO, &sp);
   printf("Set scheduler           : %d\n", ret);
   
-  printf("\nCreating test folder...");
+  printf("\nCreating subfolder...");
   createFolder(folder, SUB_FOLDER);
-  
-  printf("\nWriting small files...");
-  clock_gettime(CLOCK_REALTIME, &tStart);	
-  writeFiles(sfile_a,sfile_s,subf);
-  clock_gettime(CLOCK_REALTIME, &tEnd);
-  dif = diff(tStart, tEnd);
-  printf("DONE in %f second(s)\n", dif);
-  printf("Estimated speed is %f MB/s\n", sfile_s*sfile_a/dif/1000000);
 
-  printf("\nWriting big files...  ");
-  clock_gettime(CLOCK_REALTIME, &tStart);
-  writeFiles(bfile_a,bfile_s,subf);
-  clock_gettime(CLOCK_REALTIME, &tEnd);
-  dif = diff(tStart, tEnd);
-  printf("DONE in %f second(s)\n", dif);
-  printf("Estimated speed is %f MB/s\n", bfile_s*bfile_a/dif/1000000);
+  printf("\nWriting small files...\n");
+  writeFiles(sfile_a,sfile_s,subf,"small_",multiple);
   
+  printf("\nWriting big   files...\n");
+  writeFiles(bfile_a,bfile_s,subf,"big_",multiple);
 
   cleanFolder(subf);
   
@@ -173,13 +165,15 @@ static int createFolder(char* root, char* sub){
   snprintf(subf,STR_MAX_LEN,"%s%s",root,sub);
   dir = opendir(subf);
   if(dir){
-    printf("Folder %s already existing !\nExiting...\n",subf);
+    printf(" %s already existing !\nExiting...\n",subf);
     closedir(dir);
     exit(EXIT_FAILURE);
   }else{
     if(mkdir(subf,0700)){
-      printf("Error while creating subfolder %s\nExiting...\n",subf);
+      printf(" error creating folder %s\nExiting...\n",subf);
       exit(EXIT_FAILURE);
+    }else{
+      printf("success !\n");
     }
   }
   return 0;
@@ -189,12 +183,12 @@ static int cleanFolder(char* folder){
   DIR* dir;
   struct dirent *d;
   char filename[STR_MAX_LEN];
-  char input[4];
+  char input;
   bool all_f_removed;
   
   printf("\nDo you want to delete the folder %s (and its files) ? [y/n] :",folder);
-  scanf("%3s",input);
-  if(input[0] == 'y' || input[0] == 'Y'){
+  scanf(" %c",&input);
+  if(input == 'y' || input == 'Y'){
     dir = opendir(folder);
     if(dir){
       if(show_deletion) printf("Files are :\n");
@@ -212,9 +206,9 @@ static int cleanFolder(char* folder){
         }
       }
       if(all_f_removed){
-        printf("\nRemoving folder : %s... ",folder);
+        printf("%s... ",folder);
         if(!rmdir(folder)){
-          printf("success !\n");
+          printf("removed !\n");
         }else{
           printf("failed...\n");
         }
@@ -231,30 +225,56 @@ static int cleanFolder(char* folder){
 }
 
 //write nb files of size
-static int writeFiles(int nb, int size, char* folder){
+static int writeFiles(int nb, int size, char* folder, char* filePrefix, int multiple){
+  struct timespec tStart, tEnd;
   FILE * fp;
   char filename[STR_MAX_LEN];
-  char* buffer = calloc(sizeof(char),size); //buffer for one file
+  float sec;
+  float mbps;
+  float s_min=FLT_MAX,s_max=FLT_MIN,s_tot=0;
   
+  char* buffer = (char*)calloc(size,sizeof(char)); //buffer for one file
   if(buffer == NULL){
-    printf("Error while allocating memory\nExiting...\n");
+    printf("Error while allocating writing buffer\nExiting...\n");
     exit(EXIT_FAILURE);
   }
-  //create each file
-  for(int i=0;i<nb;i++){
-    snprintf(filename,STR_MAX_LEN,"%s/%s_%d",folder,"test",i);
-    fp = fopen(filename,"wb");
-    if(fp != NULL){
-      fwrite(buffer,size,sizeof(char),fp);
-      fclose (fp);
-    }else{
-      printf("Error when opening file %s (Do you have write rights ?)\nExiting...\n",filename);
-      exit(EXIT_FAILURE);
+  
+  for(int i=0;i<multiple;i++){
+    printf("Round %d...",i);
+
+    //create each file
+    clock_gettime(CLOCK_REALTIME, &tStart);	
+    for(int i=0;i<nb;i++){
+      snprintf(filename,STR_MAX_LEN,"%s/%s%d",folder,filePrefix,i);
+      fp = fopen(filename,"wb");
+      if(fp != NULL){
+        fwrite(buffer,size,sizeof(char),fp);
+        fclose (fp);
+      }else{
+        printf("Error when opening file %s (Do you have write rights ?)\nExiting...\n",filename);
+        exit(EXIT_FAILURE);
+      }
     }
+    clock_gettime(CLOCK_REALTIME, &tEnd);
+    
+    sec = diff(tStart, tEnd);
+    mbps = size*nb/sec/BPS_RATIO;
+    printf("DONE in %f second(s), Estimated speed is %.2f %s\n",sec,mbps,BPS_UNIT);
+    s_tot += sec;
+    if(sec>s_max) s_max=sec;
+    if(sec<s_min) s_min=sec;
   }
+    
+  printf("MIN/MAX/AVG : %.2f/%.2f/%.2f [s] %.2f/%.2f/%.2f [%s]\n",s_min,
+                                                                    s_max,
+                                                                    s_tot/multiple,
+                                                                    size*nb/s_max/BPS_RATIO,
+                                                                    size*nb/s_min/BPS_RATIO,
+                                                                    size*nb/(s_tot/multiple)/BPS_RATIO,
+                                                                    BPS_UNIT);
+  
   return 0;
 }
-
 
 //return the number of seconds between two timestamps
 static double diff(struct timespec start, struct timespec end){
